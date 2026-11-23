@@ -1,0 +1,58 @@
+#!/bin/sh
+# Alat bantu cportal
+NFT=/usr/sbin/nft
+
+die() { echo "$*" >&2; exit 1; }
+valid_mac() { echo "$1" | grep -Eqi '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'; }
+
+mac_arg() {
+	valid_mac "$1" || die "MAC tidak valid: $1"
+	echo "$1" | tr 'A-F' 'a-f'
+}
+
+case "$1" in
+	status)
+		"$NFT" list set inet cportal whitelist
+		"$NFT" list set inet cportal authed
+		;;
+	grant) # grant MAC [menit]  (0 = tanpa batas)
+		mac=$(mac_arg "$2") || exit 1
+		m=${3:-60}
+		case "$m" in ''|*[!0-9]*) die "menit harus angka" ;; esac
+		if [ "$m" = 0 ]; then
+			"$NFT" add element inet cportal authed "{ $mac }"
+		else
+			"$NFT" add element inet cportal authed "{ $mac timeout ${m}m }"
+		fi
+		;;
+	kick) # kick MAC
+		mac=$(mac_arg "$2") || exit 1
+		"$NFT" delete element inet cportal authed "{ $mac }"
+		;;
+	allow) # allow MAC [nama]  -> whitelist permanen
+		mac=$(mac_arg "$2") || exit 1
+		s=$(uci add cportal whitelist) || exit 1
+		uci set "cportal.$s.mac=$mac"
+		[ -n "$3" ] && uci set "cportal.$s.name=$3"
+		uci commit cportal
+		/etc/init.d/cportal reload
+		;;
+	deny) # deny MAC  -> hapus dari whitelist
+		mac=$(mac_arg "$2") || exit 1
+		for s in $(uci -X show cportal | grep -i "\.mac='$mac'" | cut -d. -f2); do
+			uci delete "cportal.$s"
+		done
+		uci commit cportal
+		/etc/init.d/cportal reload
+		;;
+	*)
+		cat <<EOF
+pemakaian: cportalctl <perintah>
+  status              tampilkan whitelist dan sesi login aktif
+  grant MAC [menit]   beri akses sementara (default 60, 0 = tanpa batas)
+  kick MAC            putus sesi login
+  allow MAC [nama]    tambah ke whitelist permanen
+  deny MAC            hapus dari whitelist
+EOF
+		;;
+esac

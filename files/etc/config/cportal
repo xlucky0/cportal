@@ -1,0 +1,29 @@
+config global 'main'
+	option enabled '1'
+	# device L3 yang dikunci captive portal (bisa lebih dari satu)
+	list interface 'br-lan'
+	option portal_port '2050'
+	option title 'WiFi Gratis'
+	option message 'Silakan login untuk mengakses internet.'
+
+# Perangkat di whitelist: langsung konek tanpa halaman login
+#config whitelist
+#	option name 'HP Bapak'
+#	option mac 'AA:BB:CC:DD:EE:FF'
+
+# duration = menit (0 = tanpa batas)
+# cooldown = menit jeda sebelum perangkat yang sama boleh login lagi dengan akun ini (0 = tanpa jeda)
+# show_hint = 1 -> kredensial ditampilkan di halaman login
+config account
+	option username 'admin'
+	option password 'admin'
+	option duration '60'
+	option cooldown '0'
+	option show_hint '0'
+
+config account
+	option username 'user'
+	option password 'user'
+	option duration '60'
+	option cooldown '0'
+	option show_hint '1'

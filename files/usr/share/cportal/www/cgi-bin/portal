@@ -1,0 +1,275 @@
+#!/usr/bin/ucode
+'use strict';
+
+import { cursor } from 'uci';
+import * as fs from 'fs';
+
+const STATE = '/tmp/cportal';
+const NFT = '/usr/sbin/nft';
+const MAX_FAIL = 5;
+const FAIL_WINDOW = 60;
+
+/* ---------- util ---------- */
+
+function esc(s) {
+	s = (s == null) ? '' : '' + s;
+	s = replace(s, '&', '&amp;');
+	s = replace(s, '<', '&lt;');
+	s = replace(s, '>', '&gt;');
+	s = replace(s, '"', '&quot;');
+	s = replace(s, "'", '&#39;');
+	return s;
+}
+
+function urldecode(s) {
+	s = replace(s, '+', ' ');
+	let out = '', i = 0, n = length(s);
+	while (i < n) {
+		let c = substr(s, i, 1);
+		if (c == '%' && i + 2 < n + 0) {
+			let h = substr(s, i + 1, 2);
+			if (match(h, /^[0-9a-fA-F]{2}$/)) {
+				out += chr(hex(h));
+				i += 3;
+				continue;
+			}
+		}
+		out += c;
+		i++;
+	}
+	return out;
+}
+
+function parse_form(body) {
+	let r = {};
+	for (let kv in split(body, '&')) {
+		let i = index(kv, '=');
+		if (i < 0)
+			continue;
+		r[urldecode(substr(kv, 0, i))] = urldecode(substr(kv, i + 1));
+	}
+	return r;
+}
+
+function mac_of(ip) {
+	let f = fs.open('/proc/net/arp', 'r');
+	if (!f)
+		return null;
+	f.read('line');
+	let l;
+	while ((l = f.read('line'))) {
+		let p = split(trim(l), /\s+/);
+		if (p[0] == ip && p[3] && p[3] != '00:00:00:00:00:00') {
+			f.close();
+			return lc(p[3]);
+		}
+	}
+	f.close();
+	return null;
+}
+
+function nft_run(args) {
+	return system(concat([ NFT ], args));
+}
+
+function in_set(name, mac) {
+	let p = fs.popen(NFT + ' get element inet cportal ' + name + ' { ' + mac + ' } 2>/dev/null');
+	if (!p)
+		return null;
+	let out = p.read('all');
+	let rc = p.close();
+	if (rc != 0 || !out)
+		return null;
+	let m = match(out, /expires ([0-9hms]+)/);
+	return { expires: m ? m[1] : null };
+}
+
+function pretty_time(t) {
+	t = replace(t, 'h', ' jam ');
+	t = replace(t, 'm', ' menit ');
+	t = replace(t, 's', ' detik');
+	return trim(t);
+}
+
+function dur_label(d) {
+	d = +d || 0;
+	if (d == 0)
+		return 'tanpa batas waktu';
+	if (d >= 60 && d % 60 == 0)
+		return (d / 60) + ' jam';
+	return d + ' menit';
+}
+
+function read_state(path) {
+	let v = fs.readfile(path);
+	return v ? trim(v) : null;
+}
+
+/* ---------- html ---------- */
+
+const CSS = 'body{margin:0;font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;' +
+	'display:flex;min-height:100vh;align-items:center;justify-content:center}' +
+	'.card{background:#1e293b;border-radius:14px;padding:24px;width:min(92vw,360px);box-sizing:border-box}' +
+	'h1{margin:0 0 8px;font-size:1.4rem}p{margin:6px 0 14px;color:#94a3b8}' +
+	'input,button{width:100%;box-sizing:border-box;padding:12px;margin:6px 0;border-radius:8px;' +
+	'border:1px solid #334155;font-size:1rem}input{background:#0f172a;color:#e2e8f0}' +
+	'button{background:#38bdf8;color:#0f172a;font-weight:600;border:0;cursor:pointer}' +
+	'.err{color:#fca5a5}.ok{color:#86efac}.hint{margin-top:14px;padding:10px;border-radius:8px;' +
+	'background:#0f172a;font-size:.9rem}';
+
+function page(title, body) {
+	return '<!doctype html><html lang="id"><head><meta charset="utf-8">' +
+		'<meta name="viewport" content="width=device-width,initial-scale=1">' +
+		'<title>' + esc(title) + '</title><style>' + CSS + '</style></head><body>' +
+		'<div class="card">' + body + '</div></body></html>';
+}
+
+function respond(html, code) {
+	print('Status: ' + (code || '200 OK') + '\r\n' +
+		'Content-Type: text/html; charset=utf-8\r\n' +
+		'Cache-Control: no-store\r\n\r\n' + html);
+}
+
+/* ---------- config ---------- */
+
+const ctx = cursor();
+ctx.load('cportal');
+const main = ctx.get_all('cportal', 'main') || {};
+const title = main.title || 'WiFi';
+const message = main.message || '';
+let accounts = [];
+ctx.foreach('cportal', 'account', (s) => { push(accounts, s); });
+
+function login_page(err) {
+	let b = '<h1>' + esc(title) + '</h1><p>' + esc(message) + '</p>';
+	if (err)
+		b += '<p class="err">' + esc(err) + '</p>';
+	b += '<form method="post" action="/cgi-bin/portal">' +
+		'<input name="action" type="hidden" value="login">' +
+		'<input name="username" placeholder="Username" autocapitalize="none" autocomplete="username" required>' +
+		'<input name="password" type="password" placeholder="Password" autocomplete="current-password" required>' +
+		'<button type="submit">Masuk</button></form>';
+	for (let a in accounts) {
+		if (a.show_hint != '1')
+			continue;
+		b += '<div class="hint">Akses ' + esc(dur_label(a.duration)) +
+			'<br>User: <b>' + esc(a.username) + '</b> &nbsp; Password: <b>' + esc(a.password) + '</b></div>';
+	}
+	return page(title, b);
+}
+
+function status_page(info, whitelisted) {
+	let b = '<h1>' + esc(title) + '</h1><p class="ok">Anda sudah terhubung ke internet.</p>';
+	if (whitelisted) {
+		b += '<p>Perangkat ini ada di daftar izin (tanpa batas waktu).</p>';
+	} else {
+		b += '<p>' + (info.expires ? 'Sisa waktu: <b>' + esc(pretty_time(info.expires)) + '</b>'
+			: 'Tanpa batas waktu.') + '</p>' +
+			'<form method="post" action="/cgi-bin/portal">' +
+			'<input name="action" type="hidden" value="logout">' +
+			'<button type="submit">Keluar</button></form>';
+	}
+	return page(title, b);
+}
+
+/* ---------- logic ---------- */
+
+function nomac(mac) { return replace(mac, ':', ''); }
+
+function login(mac, form) {
+	fs.mkdir(STATE);
+	fs.mkdir(STATE + '/fail');
+	fs.mkdir(STATE + '/last');
+
+	let now = time();
+	let ff = STATE + '/fail/' + nomac(mac);
+	let fv = read_state(ff);
+	if (fv) {
+		let p = split(fv, ' ');
+		if (now - (+p[1]) > FAIL_WINDOW)
+			fs.unlink(ff);
+		else if ((+p[0]) >= MAX_FAIL)
+			return 'Terlalu banyak percobaan. Coba lagi sebentar.';
+	}
+
+	let acc;
+	for (let a in accounts) {
+		if (a.username == form.username && a.password == form.password) {
+			acc = a;
+			break;
+		}
+	}
+
+	if (!acc) {
+		let cnt = 1;
+		if (fv) {
+			let p = split(fv, ' ');
+			if (now - (+p[1]) <= FAIL_WINDOW)
+				cnt = (+p[0]) + 1;
+		}
+		fs.writefile(ff, cnt + ' ' + now);
+		return 'Username atau password salah.';
+	}
+	fs.unlink(ff);
+
+	let dur = int(acc.duration);
+	if (dur == null || dur < 0)
+		dur = 0;
+	let cd = int(acc.cooldown);
+	if (cd == null || cd < 0)
+		cd = 0;
+
+	let lf = STATE + '/last/' + replace(acc.username, /[^A-Za-z0-9_-]/g, '_') + '_' + nomac(mac);
+	if (cd > 0 && dur > 0) {
+		let last = +read_state(lf);
+		if (last) {
+			let until = last + (dur + cd) * 60;
+			if (now < until)
+				return 'Akun ini baru saja dipakai. Coba lagi dalam ' + ceil((until - now) / 60) + ' menit.';
+		}
+	}
+
+	let args = [ 'add', 'element', 'inet', 'cportal', 'authed' ];
+	push(args, dur > 0 ? '{ ' + mac + ' timeout ' + dur + 'm }' : '{ ' + mac + ' }');
+	if (nft_run(args) != 0)
+		return 'Gagal membuka akses. Hubungi admin.';
+
+	fs.writefile(lf, '' + now);
+	return null;
+}
+
+/* ---------- main ---------- */
+
+const ip = getenv('REMOTE_ADDR');
+const mac = ip ? mac_of(ip) : null;
+
+if (!mac || !match(mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/)) {
+	respond(page(title, '<h1>' + esc(title) + '</h1><p class="err">Perangkat tidak dikenali. Hubungkan ulang WiFi.</p>'));
+	exit(0);
+}
+
+let form = {};
+if (getenv('REQUEST_METHOD') == 'POST') {
+	let len = +getenv('CONTENT_LENGTH') || 0;
+	if (len > 4096)
+		len = 4096;
+	if (len > 0)
+		form = parse_form(fs.stdin.read(len) || '');
+}
+
+if (form.action == 'logout') {
+	nft_run([ 'delete', 'element', 'inet', 'cportal', 'authed', '{ ' + mac + ' }' ]);
+	respond(login_page(null));
+	exit(0);
+}
+
+let err = null;
+if (form.action == 'login')
+	err = login(mac, form);
+
+if (in_set('whitelist', mac))
+	respond(status_page({}, true));
+else {
+	let a = in_set('authed', mac);
+	respond(a ? status_page(a, false) : login_page(err));
+}
